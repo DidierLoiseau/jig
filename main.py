@@ -1,23 +1,49 @@
 from __future__ import annotations
 
-from colorsys import hsv_to_rgb
 from functools import total_ordering
 from typing import *
+from typing import Any
 
 import cv2 as cv
 import numpy as np
 import numpy.typing as npt
+from numpy import ndarray, dtype
+from scipy.signal import argrelextrema
 from skimage import io
+
+
+def angle_between_arrays(p1s: npt.NDArray[Any], p2s: npt.NDArray[Any], p3s: npt.NDArray[Any]) -> npt.NDArray[np.float]:
+    """
+    Compute element-wise 3-point angles in anti-clockwise direction, with values between pi and 2*pi
+
+    :param p1s: array of first points
+    :param p2s: array of the middle points at the center of the angles
+    :param p3s: array of last points
+    :return: array of corresponding angles in rad
+    """
+    v21s = p1s - p2s
+    v23s = p3s - p2s
+    dot = np.empty(len(v21s))
+    # seems to be the best solution based on https://stackoverflow.com/a/41443497/525036
+    for i in range(len(v21s)):
+        dot[i] = np.dot(v21s[i], v23s[i])
+    det = np.cross(v21s, v23s)
+
+    angles = np.arctan2(det, dot)
+    angles[angles < 0] += 2*np.pi
+    return angles
 
 
 @total_ordering
 class PuzzlePiece:
+    center: npt.NDArray[np.float]
     id: Optional[str]
 
     def __init__(self, contour: npt.NDArray[np.int64]):
         self.contour = contour
-        self.minX, self.minY = contour.min(0)[0]
-        self.maxX, self.maxY = contour.max(0)[0]
+        self.minX, self.minY = topLeft = contour.min(0, initial=None)[0]
+        self.maxX, self.maxY = bottomRight = contour.max(0, initial=None)[0]
+        self.center = (topLeft + bottomRight) / 2
         self.id = None
 
     def __eq__(self, other):
@@ -43,11 +69,56 @@ class PuzzlePiece:
     def __repr__(self):
         return "PuzzlePiece(%r)" % self.id
 
+    def extremes(self) -> (ndarray[Any, dtype[int]], list[ndarray[dtype[int]]]):
+        # compute distance between center and contour to find the locally furthest points
+        centered = self.contour[:, 0, :] - self.center
+        cont_len = len(self.contour)
+        norms = np.linalg.norm(centered, axis=1)
+        candidates: npt.NDArray[int] = argrelextrema(norms, np.greater_equal, mode='wrap')[0]
+        # enlarge lookup around candidates for potentially more acute angles
+        # FIXME arbitrary range expansion should depend on pieces size
+        lookaround = np.repeat(np.arange(-3, 3)[:, np.newaxis], len(candidates), axis=1)
+        # remove duplicates – this also brings us back to a 1d array
+        candidates = np.unique(np.mod(lookaround + candidates, cont_len))
+        # split int sequences of continuous candidates...
+        split_idx = np.flatnonzero(np.diff(candidates) != 1) + 1
+        roll = candidates[-1] == cont_len - 1 and candidates[0] == 0
+        if roll:
+            # our candidates wrap around the contour, join end with start
+            roll_shift = len(candidates) - split_idx[-1]
+            candidates = np.roll(candidates, roll_shift)
+            split_idx += roll_shift
+        # ... but avoid too large ones
+        # FIXME arbitrary LARGE_GAP should depend on pieces size
+        LARGE_GAP = 10
+        large_gaps = np.diff(split_idx) > LARGE_GAP
+        if np.any(large_gaps):
+            gaps_pos = np.flatnonzero(large_gaps)
+            split_idx = np.insert(split_idx, gaps_pos + 1, (split_idx[gaps_pos] + split_idx[gaps_pos + 1]) / 2)
+        if split_idx[0] > LARGE_GAP:
+            split_idx = np.insert(split_idx, 0, split_idx[0] / 2)
+        if roll:
+            split_idx = split_idx[:-1]
 
-if __name__ == '__main__':
-    img = io.imread('https://vouwbad.nl/jigsaw/jigsawsqr.png')[70:, 90:]
+        cont_cand = np.split(candidates, split_idx)
+        shift = lambda s: self.contour[np.mod(candidates + s, cont_len), 0]
+        # /!\ contours are counter-clockwise… with an inverted y-axis!
+        # Thus take the points in original order to get inside angles at our potential corners
+        # fixme arbitrary neighbour selection should depend on pieces size
+        angles = angle_between_arrays(shift(-5), self.contour[candidates, 0], shift(5))
+        cont_angles = np.split(angles, split_idx)
+        acutest = list(np.argmin(ca) for ca in cont_angles)
+        best_cands = list(c[acutest[i]] for i, c in enumerate(cont_cand) if np.pi/4 < cont_angles[i][acutest[i]] < 3*np.pi/4)
+        return candidates, best_cands
+
+
+def main():
+    # origimg = io.imread('https://vouwbad.nl/jigsaw/jigsawsqr.png')
+    origimg = io.imread('jigsawsqr.png')
+    displayed = origimg
+    img = origimg[65:, 80:]
     ret, mask = cv.threshold(img[:, :, 1], 0, 255, cv.THRESH_BINARY)
-    contours, hierarchy = cv.findContours(mask, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv.findContours(mask, cv.RETR_LIST, cv.CHAIN_APPROX_NONE)
     pieces: list[PuzzlePiece] = list(PuzzlePiece(c) for c in contours if len(c) > 10)
     pieces.sort()
     print('pieces:', len(pieces))
@@ -65,14 +136,25 @@ if __name__ == '__main__':
         piece.set_coordinates(row, chr(col))
         prev = piece
 
-        hue = float(i) / len(pieces)
-        color = tuple(round(v * 255) for v in hsv_to_rgb(hue, 1, 1))
-        cv.drawContours(img, [piece.contour], 0, color, 1)
+        cv.drawContours(img, [piece.contour], 0, (255, 0, 0), 1)
+        cv.circle(img, np.rint(piece.center).astype(int), 1, (255, 0, 0), -1)
+
+        candidates, extremes = piece.extremes()
+        for c in candidates:
+            cv.circle(img, piece.contour[c, 0], 0, (0, 255, 0), -1)
+        print(piece.id, 'extremes:', len(extremes), 'nice!' if len(extremes) == 4 else 'fixme…')
+        for k, ext in enumerate(extremes):
+            cv.circle(img, piece.contour[ext, 0], 0, (0, 0, 255), -1)
+
     print('first piece:', pieces[0], 'last piece:', pieces[-1])
 
     cv.namedWindow("image", cv.WINDOW_NORMAL)
-    cv.imshow("image", img)
+    cv.imshow("image", displayed)
     while cv.getWindowProperty("image", cv.WND_PROP_VISIBLE):
         key = cv.waitKey(100)
         if key != -1 and key != 233:
             break
+
+
+if __name__ == '__main__':
+    main()
