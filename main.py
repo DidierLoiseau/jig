@@ -14,7 +14,7 @@ from skimage import io
 
 def angle_between_arrays(p1s: npt.NDArray[Any], p2s: npt.NDArray[Any], p3s: npt.NDArray[Any]) -> npt.NDArray[np.float]:
     """
-    Compute element-wise 3-point angles in anti-clockwise direction, with values between pi and 2*pi
+    Compute element-wise 3-point angles in anti-clockwise direction, with values between -pi and pi
 
     :param p1s: array of first points
     :param p2s: array of the middle points at the center of the angles
@@ -29,9 +29,7 @@ def angle_between_arrays(p1s: npt.NDArray[Any], p2s: npt.NDArray[Any], p3s: npt.
         dot[i] = np.dot(v21s[i], v23s[i])
     det = np.cross(v21s, v23s)
 
-    angles = np.arctan2(det, dot)
-    angles[angles < 0] += 2*np.pi
-    return angles
+    return np.arctan2(det, dot)
 
 
 @total_ordering
@@ -69,7 +67,7 @@ class PuzzlePiece:
     def __repr__(self):
         return "PuzzlePiece(%r)" % self.id
 
-    def extremes(self) -> (ndarray[Any, dtype[int]], list[ndarray[dtype[int]]]):
+    def find_corners(self) -> (ndarray[Any, dtype[int]], ndarray[dtype[int]], ndarray[Any, dtype[int]]):
         # compute distance between center and contour to find the locally furthest points
         centered = self.contour[:, 0, :] - self.center
         cont_len = len(self.contour)
@@ -101,15 +99,30 @@ class PuzzlePiece:
             split_idx = split_idx[:-1]
 
         cont_cand = np.split(candidates, split_idx)
-        shift = lambda s: self.contour[np.mod(candidates + s, cont_len), 0]
+        shift = lambda cdts, s: self.contour[np.mod(cdts + s, cont_len), 0]
         # /!\ contours are counter-clockwise… with an inverted y-axis!
         # Thus take the points in original order to get inside angles at our potential corners
         # fixme arbitrary neighbour selection should depend on pieces size
-        angles = angle_between_arrays(shift(-5), self.contour[candidates, 0], shift(5))
+        NEIB4ANGLES = 5
+        angles = angle_between_arrays(
+            shift(candidates, -NEIB4ANGLES),
+            self.contour[candidates, 0],
+            shift(candidates, NEIB4ANGLES))
+        angles[angles < 0] += 2 * np.pi
         cont_angles = np.split(angles, split_idx)
         acutest = list(np.argmin(ca) for ca in cont_angles)
-        best_cands = list(c[acutest[i]] for i, c in enumerate(cont_cand) if np.pi/4 < cont_angles[i][acutest[i]] < 3*np.pi/4)
-        return candidates, best_cands
+        good_cands = best_cands = np.fromiter(
+            (c[a] for ca, a, c in zip(cont_angles, acutest, cont_cand) if np.pi / 4 < ca[a] < 3 * np.pi / 4), int)
+        # check if candidate corners all face the center
+        # check if center does not see previous neighbour left of candidate
+        good_prev = angle_between_arrays(self.contour[best_cands, 0], self.center, shift(best_cands, -NEIB4ANGLES)) > 0
+        if not np.all(good_prev):
+            best_cands = best_cands[good_prev]
+        # check if center does not see next neighbour right of candidate
+        good_next = angle_between_arrays(shift(best_cands, NEIB4ANGLES), self.center, self.contour[best_cands, 0]) > 0
+        if not np.all(good_next):
+            best_cands = best_cands[good_next]
+        return candidates, good_cands, best_cands
 
 
 def main():
@@ -139,11 +152,13 @@ def main():
         cv.drawContours(img, [piece.contour], 0, (255, 0, 0), 1)
         cv.circle(img, np.rint(piece.center).astype(int), 1, (255, 0, 0), -1)
 
-        candidates, extremes = piece.extremes()
+        candidates, good_cands, best_cands = piece.find_corners()
         for c in candidates:
             cv.circle(img, piece.contour[c, 0], 0, (0, 255, 0), -1)
-        print(piece.id, 'extremes:', len(extremes), 'nice!' if len(extremes) == 4 else 'fixme…')
-        for k, ext in enumerate(extremes):
+        for c in good_cands:
+            cv.circle(img, piece.contour[c, 0], 0, (0, 196, 255), -1)
+        print(piece.id, 'best_cands:', len(best_cands), 'nice!' if len(best_cands) == 4 else 'fixme…')
+        for k, ext in enumerate(best_cands):
             cv.circle(img, piece.contour[ext, 0], 0, (0, 0, 255), -1)
 
     print('first piece:', pieces[0], 'last piece:', pieces[-1])
