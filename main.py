@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import logging.config
 from functools import total_ordering
 from typing import *
 from typing import Any
@@ -7,9 +9,12 @@ from typing import Any
 import cv2 as cv
 import numpy as np
 import numpy.typing as npt
+import yaml
 from numpy import ndarray, dtype
 from scipy.signal import argrelextrema
 from skimage import io
+
+logger = logging.getLogger(__name__)
 
 
 def angle_between_arrays(p1s: npt.NDArray[Any], p2s: npt.NDArray[Any], p3s: npt.NDArray[Any]) -> npt.NDArray[np.float]:
@@ -72,6 +77,9 @@ class PuzzlePiece:
         centered = self.contour[:, 0, :] - self.center
         cont_len = len(self.contour)
         norms = np.linalg.norm(centered, axis=1)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug('Centered contour and distance for %s:\n%s', self.id,
+                         np.concatenate((centered, np.array([norms]).T), axis=1))
         candidates: npt.NDArray[int] = argrelextrema(norms, np.greater_equal, mode='wrap')[0]
         # enlarge lookup around candidates for potentially more acute angles
         # FIXME arbitrary range expansion should depend on pieces size
@@ -134,7 +142,7 @@ def main():
     contours, hierarchy = cv.findContours(mask, cv.RETR_LIST, cv.CHAIN_APPROX_NONE)
     pieces: list[PuzzlePiece] = list(PuzzlePiece(c) for c in contours if len(c) > 10)
     pieces.sort()
-    print('pieces:', len(pieces))
+    logger.info('Piece count %i', len(pieces))
 
     row = 1
     col = ord('A')
@@ -157,11 +165,12 @@ def main():
             cv.circle(img, piece.contour[c, 0], 0, (0, 255, 0), -1)
         for c in good_cands:
             cv.circle(img, piece.contour[c, 0], 0, (0, 196, 255), -1)
-        print(piece.id, 'best_cands:', len(best_cands), 'nice!' if len(best_cands) == 4 else 'fixme…')
+        if len(best_cands) != 4:
+            logger.warning('Piece %s has %i corners!', piece.id, len(best_cands))
         for k, ext in enumerate(best_cands):
             cv.circle(img, piece.contour[ext, 0], 0, (0, 0, 255), -1)
 
-    print('first piece:', pieces[0], 'last piece:', pieces[-1])
+    logger.info('Top left: %s Bottom right: %s', pieces[0].id, pieces[-1].id)
 
     cv.namedWindow("image", cv.WINDOW_NORMAL)
     cv.imshow("image", displayed)
@@ -172,4 +181,8 @@ def main():
 
 
 if __name__ == '__main__':
+    with open('logging.yml', 'r') as stream:
+        config = yaml.load(stream, Loader=yaml.FullLoader)
+    logging.config.dictConfig(config)
+
     main()
