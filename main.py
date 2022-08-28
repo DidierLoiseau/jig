@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import logging
 import logging.config
+import re
 from functools import total_ordering
 from typing import *
 from typing import Any
@@ -40,14 +42,16 @@ def angle_between_arrays(p1s: npt.NDArray[Any], p2s: npt.NDArray[Any], p3s: npt.
 @total_ordering
 class PuzzlePiece:
     center: npt.NDArray[np.float]
-    id: Optional[str]
+    col: Optional[str]
+    row: Optional[int]
 
     def __init__(self, contour: npt.NDArray[np.int64]):
         self.contour = contour
         self.minX, self.minY = topLeft = contour.min(0, initial=None)[0]
         self.maxX, self.maxY = bottomRight = contour.max(0, initial=None)[0]
         self.center = (topLeft + bottomRight) / 2
-        self.id = None
+        self.col = None
+        self.row = None
 
     def __eq__(self, other):
         return self.is_same_row(other) and self.is_same_col(other)
@@ -66,8 +70,13 @@ class PuzzlePiece:
     def is_same_col(self, other: PuzzlePiece) -> bool:
         return self.minX < other.maxX and self.maxX > other.minX
 
-    def set_coordinates(self, row: int, col: str):
-        self.id = col + str(row)
+    def set_coordinates(self, col: str, row: int):
+        self.col = col
+        self.row = row
+
+    @property
+    def id(self):
+        return self.col + str(self.row)
 
     def __repr__(self):
         return "PuzzlePiece(%r)" % self.id
@@ -133,9 +142,9 @@ class PuzzlePiece:
         return candidates, good_cands, best_cands
 
 
-def main():
+def main(piece1: Optional[str, int], piece2: Optional[str, int]):
     # origimg = io.imread('https://vouwbad.nl/jigsaw/jigsawsqr.png')
-    origimg = io.imread('jigsawsqr.png')
+    origimg: ndarray[dtype[int]] = io.imread('jigsawsqr.png')
     displayed = origimg
     img = origimg[65:, 80:]
     ret, mask = cv.threshold(img[:, :, 1], 0, 255, cv.THRESH_BINARY)
@@ -147,6 +156,7 @@ def main():
     row = 1
     col = ord('A')
     prev: Optional[PuzzlePiece] = None
+    min_y, min_x, max_y, max_x = img.shape[0], img.shape[1], 0, 0
     for i, piece in enumerate(pieces):
         if prev is not None:
             if piece.is_same_row(prev):
@@ -154,23 +164,35 @@ def main():
             else:
                 row += 1
                 col = ord('A')
-        piece.set_coordinates(row, chr(col))
+        piece.set_coordinates(chr(col), row)
         prev = piece
 
         cv.drawContours(img, [piece.contour], 0, (255, 0, 0), 1)
         cv.circle(img, np.rint(piece.center).astype(int), 1, (255, 0, 0), -1)
+        if (piece1 is None
+                or piece1[0] <= piece.col <= piece2[0]
+                and piece1[1] <= piece.row <= piece2[1]):
+            min_y, min_x = min(min_y, piece.minY), min(min_x, piece.minX)
+            max_y, max_x = max(max_y, piece.maxY), max(max_x, piece.maxX)
 
-        candidates, good_cands, best_cands = piece.find_corners()
-        for c in candidates:
-            cv.circle(img, piece.contour[c, 0], 0, (0, 255, 0), -1)
-        for c in good_cands:
-            cv.circle(img, piece.contour[c, 0], 0, (0, 196, 255), -1)
-        if len(best_cands) != 4:
-            logger.warning('Piece %s has %i corners!', piece.id, len(best_cands))
-        for k, ext in enumerate(best_cands):
-            cv.circle(img, piece.contour[ext, 0], 0, (0, 0, 255), -1)
+            candidates, good_cands, best_cands = piece.find_corners()
+            for c in candidates:
+                cv.circle(img, piece.contour[c, 0], 0, (0, 255, 0), -1)
+            for c in good_cands:
+                cv.circle(img, piece.contour[c, 0], 0, (0, 196, 255), -1)
+            if len(best_cands) != 4:
+                logger.warning('Piece %s has %i corners!', piece.id, len(best_cands))
+            for k, ext in enumerate(best_cands):
+                cv.circle(img, piece.contour[ext, 0], 0, (0, 0, 255), -1)
 
     logger.info('Top left: %s Bottom right: %s', pieces[0].id, pieces[-1].id)
+    if piece1:
+        if piece1 == piece2:
+            logger.info('Showing %s%s', *piece1)
+        else:
+            logger.info('Showing pieces %s%s to %s%s', *piece1, *piece2)
+        displayed = img[max(0, min_y - 10):min(max_y + 10, img.shape[0]),
+                    max(0, min_x - 10):min(max_x + 10, img.shape[1])]
 
     cv.namedWindow("image", cv.WINDOW_NORMAL)
     cv.imshow("image", displayed)
@@ -185,4 +207,18 @@ if __name__ == '__main__':
         config = yaml.load(stream, Loader=yaml.FullLoader)
     logging.config.dictConfig(config)
 
-    main()
+
+    def parse_coord(value: str, pattern=re.compile(r'^([A-Za-z]+)(\d+)$')) -> (str, int):
+        match = pattern.match(value.upper())
+        if match:
+            return match.group(1), int(match.group(2))
+        raise argparse.ArgumentTypeError(f"invalid value '{value}'")
+
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('piece1', nargs='?', type=parse_coord, help='The top-left piece to display', )
+    parser.add_argument('piece2', nargs='?', type=parse_coord,
+                        help='The bottom-right piece to display, defaults to piece1 if it was provided')
+    args = parser.parse_args()
+
+    main(args.piece1, args.piece2 or args.piece1)
